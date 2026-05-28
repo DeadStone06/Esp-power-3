@@ -1,0 +1,88 @@
+name: ESP Watchdog
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Check ESP status
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          URL="https://api.thingspeak.com/channels/3396259/feeds.json?api_key=KQY2YD1YS4RY4U40&results=1"
+
+          RESPONSE=$(curl -s --max-time 15 \
+            -H "Accept: application/json" \
+            "$URL")
+
+          echo "$RESPONSE" | jq . >/dev/null || {
+            echo "Invalid JSON"
+            exit 0
+          }
+
+          LAST_TS=$(echo "$RESPONSE" | jq -r '.feeds[0].created_at')
+
+          if [ "$LAST_TS" = "null" ] || [ -z "$LAST_TS" ]; then
+            echo "No data"
+            exit 0
+          fi
+
+          NOW=$(date -u +%s)
+          LAST=$(date -d "$LAST_TS" +%s)
+
+          DIFF=$((NOW - LAST))
+
+          echo "Last update: $LAST_TS"
+          echo "Diff seconds: $DIFF"
+
+          if [ "$DIFF" -gt 120 ]; then
+            CURR="offline"
+          else
+            CURR="online"
+          fi
+
+          if [ ! -f .esp_state ]; then
+            echo "online" > .esp_state
+          fi
+
+          PREV=$(cat .esp_state)
+
+          echo "Prev state: $PREV"
+          echo "Curr state: $CURR"
+
+          if [ "$PREV" != "$CURR" ]; then
+            if [ "$CURR" = "offline" ]; then
+              curl -v \
+                -H "Title: ⚠️ НЕТ СВЕТА(Д)" \
+                -H "Priority: high" \
+                -d "⚡ Дома пропало электричество" \
+                "$NTFY_URL"
+            else
+              curl -v \
+                -H "Title: ✅ СВЕТ ЕСТЬ(Д)" \
+                -H "Priority: high" \
+                -d "✅ Электричество появилось" \
+                "$NTFY_URL"
+            fi
+
+            echo "$CURR" > .esp_state
+
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+
+            git add .esp_state
+            git commit -m "Update ESP state: $CURR" || true
+            git push
+          fi
